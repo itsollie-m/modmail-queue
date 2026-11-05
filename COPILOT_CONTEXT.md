@@ -514,3 +514,111 @@ All collection operations must be asynchronous.
 - Do not assume a plugin shutdown event, reload callback, stable collection-name
   contract, or existing third-party database example without verifying the
   target Modmail source.
+
+### 10.6 MongoDB, Motor, and Concurrency Compatibility
+
+The following findings were verified against the inspected Modmail source,
+its dependency manifests, and MongoDB/Motor documentation. The MongoDB server
+version is not pinned by Modmail and must be verified for each deployment.
+
+**Verified driver versions:**
+
+- `requirements.txt` pins `motor==3.7.1` and `pymongo==4.15.3`.
+- `Pipfile` requires Motor `3.7.1` and PyMongo `>=4.9,<5`.
+- `Pipfile.lock` locks Motor `3.7.1` and PyMongo `4.15.3`.
+- Modmail creates an `AsyncIOMotorClient` and uses the `modmail_bot`
+  database. The plugin partition is therefore an asynchronous Motor
+  collection.
+
+**Verified database capabilities:**
+
+- Modmail already uses Motor's asynchronous
+  `find_one_and_update` in `core/clients.py` for single-document log
+  updates. MongoDB documents single-document write operations as atomic,
+  including `find_one_and_update`.
+- MongoDB supports partial indexes through `partialFilterExpression`.
+- MongoDB supports unique partial indexes. The uniqueness constraint applies
+  only to documents matching the partial filter, which supports conditional
+  uniqueness such as one active assignment per moderator.
+
+**Deployment limitations:**
+
+- Modmail does not check or require a MongoDB server version.
+- The Docker deployment uses the unversioned `mongo` image, so the server
+  version is deployment-dependent.
+- Partial and unique partial indexes require a compatible MongoDB server.
+  Verify the actual server version before relying on them; do not infer it
+  from the Motor or PyMongo version.
+- Unique-index creation can fail when existing data violates the constraint.
+  Existing duplicate assignments must be reconciled before creating the
+  index.
+- Additional restrictions apply if the collection is sharded. The deployment
+  must verify whether the plugin collection is sharded and whether the
+  desired unique index is permitted.
+- Single-document atomicity does not make a sequence of updates across
+  multiple ticket documents atomic. Multi-document transactions were not
+  established as a Modmail requirement and must not be assumed.
+
+**Recommended concurrency strategy:**
+
+Use a unique partial index together with one atomic claim operation:
+
+```python
+await self.coll.create_index(
+    [("assigned_to", 1)],
+    unique=True,
+    partialFilterExpression={
+        "status": "assigned",
+        "assigned_to": {"$exists": True},
+    },
+    name="one_assigned_ticket_per_moderator",
+)
+```
+
+Waiting tickets use `status: "waiting"`. A claim changes the selected oldest
+waiting ticket to `status: "assigned"` and sets `assigned_to` and
+`assigned_at` in one `find_one_and_update` operation, sorted by the FIFO
+timestamp and a deterministic tie-breaker:
+
+```python
+ticket = await self.coll.find_one_and_update(
+    {"status": "waiting"},
+    {
+        "$set": {
+            "status": "assigned",
+            "assigned_to": moderator_id,
+            "assigned_at": now,
+        }
+    },
+    sort=[("queued_at", 1), ("_id", 1)],
+    return_document=True,
+)
+```
+
+The exact Motor/PyMongo option spelling must be checked against the installed
+driver during implementation. A concurrent claim by the same moderator that
+would violate the partial unique index must handle the resulting duplicate-key
+error explicitly and report the moderator's existing assigned ticket. Do not
+rely only on a preceding read that checks whether the moderator is free; that
+check is race-prone.
+
+At plugin startup, verify the MongoDB server version and deployment topology,
+reconcile invalid existing assignments, create or verify the unique partial
+index, and surface index-creation failures rather than silently continuing.
+
+**Future maintenance:**
+
+Motor's documentation states that Motor is deprecated beginning May 14, 2026,
+with critical bug fixes planned until May 14, 2027, and recommends migration
+to the PyMongo Async driver. This does not invalidate the currently verified
+Modmail dependency, but it is a future maintenance consideration.
+
+**Source and documentation references:**
+
+- `requirements.txt`: pinned Motor and PyMongo versions
+- `Pipfile` and `Pipfile.lock`: declared and locked dependency versions
+- `core/clients.py`: `AsyncIOMotorClient` construction and
+  `find_one_and_update` usage
+- `docker-compose.yml`: unversioned MongoDB deployment image
+- MongoDB documentation: single-document atomicity and unique partial indexes
+- Motor documentation: Motor 3.7.1 requirements and deprecation notice
