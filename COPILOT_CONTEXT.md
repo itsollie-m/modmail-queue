@@ -181,6 +181,10 @@ Required functionality:
 8. Move claimed tickets into a designated active-support category.
 9. Update the positions of remaining customers.
 10. Persist queue data and assignments in MongoDB.
+11. Provide basic administrator configuration through `?queue setup`,
+    `?queue config`, and `?queue config reset`.
+12. Store the configured waiting and active-support category IDs in the
+    plugin's dedicated MongoDB collection.
 
 ### 4.2 Queue Behaviour
 
@@ -216,6 +220,25 @@ The existing embed should be updated whenever the customer's position changes.
 
 Once assigned, the embed should be removed or updated to indicate that a representative has taken ownership.
 
+### 4.5 Administrator Configuration
+
+Version 1.0.0 includes basic administrator configuration only:
+
+- `?queue setup` configures the waiting and active-support categories.
+- `?queue config` displays the current queue category configuration.
+- `?queue config reset` clears the plugin's stored category configuration.
+
+These commands must use Modmail's verified
+`@checks.has_permissions(PermissionLevel.ADMINISTRATOR)` decorator. The
+source defines `PermissionLevel.ADMINISTRATOR` as level `4` and uses this
+decorator on existing administrator-only Cog commands.
+
+Configuration must be stored in the plugin's dedicated MongoDB collection
+obtained through `bot.api.get_plugin_partition(self)`. Do not add queue
+configuration keys to Modmail's central configuration and do not modify
+Modmail core. Category values must be resolved and validated against
+`bot.modmail_guild` as `discord.CategoryChannel` objects before use.
+
 ---
 
 ## 5. Version 1.0.0 Scope Restrictions
@@ -225,7 +248,6 @@ The following features are deliberately excluded from the initial release:
 - `?my-ticket`
 - `?release-ticket`
 - `?queue` statistics command
-- Administrative configuration commands
 - Priority queues
 - Estimated waiting times
 - Advanced analytics
