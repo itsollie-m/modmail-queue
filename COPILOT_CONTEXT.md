@@ -225,13 +225,18 @@ Once assigned, the embed should be removed or updated to indicate that a represe
 
 Version 1.0.0 includes basic administrator configuration only:
 
-- `?queue setup` configures the waiting category.
-- `?queue config` displays the current queue category configuration.
-- `?queue config reset` clears the plugin's stored category configuration.
+- `?queue setup` is administrator-only, takes no required arguments, and
+  prompts interactively for the waiting category ID.
+- `?queue config` is administrator-only and displays the configured waiting
+  category and the dynamically resolved Modmail main category.
+- `?queue config reset` is administrator-only and clears the stored waiting
+  category configuration.
 
 Administrators manually enter the Discord waiting category ID. `?queue setup`
-prompts for this ID and stores it in the plugin's MongoDB collection. The
-active-support category reuses Modmail's existing
+prompts for this ID with a 60-second timeout, parses the input as an integer,
+and resolves it with `bot.modmail_guild.get_channel()`. The result must be a
+`discord.CategoryChannel`, and the validated ID is saved in the plugin's
+MongoDB collection. The active-support category reuses Modmail's existing
 `bot.config["main_category_id"]` value; administrators are not asked to enter
 a second category ID. Resolve the active-support category dynamically whenever
 it is needed so changes to Modmail's main category are respected.
@@ -239,12 +244,17 @@ it is needed so changes to Modmail's main category are respected.
 Both the stored waiting category ID and the dynamically resolved
 `bot.config["main_category_id"]` value must be resolved against
 `bot.modmail_guild` and must resolve to valid `discord.CategoryChannel`
-objects. Missing or invalid configuration must be handled explicitly.
+objects. Missing or invalid configuration must be handled explicitly. The
+`?queue config` command must clearly report missing or invalid configuration.
+`?queue setup` must not save partial configuration if input validation fails
+or the interactive prompt times out.
 
 These commands must use Modmail's verified
 `@checks.has_permissions(PermissionLevel.ADMINISTRATOR)` decorator. The
 source defines `PermissionLevel.ADMINISTRATOR` as level `4` and uses this
-decorator on existing administrator-only Cog commands.
+decorator on existing administrator-only Cog commands. The interactive input
+flow must follow the verified pattern in `cogs/threadmenu.py`. Do not use
+`SimilarCategoryConverter`; Queue configuration accepts category IDs only.
 
 Configuration must be stored in the plugin's MongoDB collection obtained
 through `bot.api.get_plugin_partition(self)`. Do not add queue
