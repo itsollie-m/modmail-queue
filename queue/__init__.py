@@ -1,0 +1,1 @@
+"""Modmail Queue plugin package."""
