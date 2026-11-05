@@ -317,3 +317,200 @@ Build a lightweight, reliable and maintainable FIFO support ticket queue that in
 The initial release should prioritise reliability and compatibility over feature quantity.
 
 Future releases should expand the plugin incrementally.
+
+---
+
+## 10. Source-Verified Modmail Implementation Findings
+
+The following findings were verified against the Modmail source repository at
+`C:\Users\ollie\Documents\modmail-source`. They supplement the official plugin
+documentation above. Source behavior may change between Modmail versions, so
+implementation must be re-verified when the target Modmail revision changes.
+
+### 10.1 Moderator Permissions
+
+**Verified source behavior:**
+
+- `PermissionLevel.MODERATOR` is defined as level `3` in
+  `core/models.py` (`PermissionLevel`).
+- `core/checks.py` defines `has_permissions(permission_level)`, which returns a
+  `commands.check` predicate.
+- The predicate calls `check_permissions(ctx, ctx.command.qualified_name)`.
+- Permission evaluation includes bot owners, the bot user, administrators in
+  the configured Modmail guild for non-owner commands, explicit command
+  permissions, and configured permission levels.
+- The check evaluates `ctx.author`, `ctx.author.roles`,
+  `ctx.bot.config`, and `ctx.bot.command_perm(...)`. No standalone
+  `is_moderator` or `ctx.author.is_mod` API was verified.
+- `bot.command_perm(command_name)` resolves a command's required level from
+  `override_command_level` or the command check's `permission_level`
+  attribute (`bot.py`, `ModmailBot.command_perm`).
+
+**Verified plugin recommendation:**
+
+```python
+from core import checks
+from core.models import PermissionLevel
+
+@commands.command()
+@checks.has_permissions(PermissionLevel.MODERATOR)
+async def next(self, ctx):
+    ...
+```
+
+This follows the existing Modmail Cog pattern, including
+`cogs/utility.py` and `cogs/modmail.py`. Do not create a separate configurable
+moderator-role system for v1.0.0.
+
+**Source references:**
+
+- `core/checks.py`: `has_permissions`,
+  `has_permissions_predicate`, and `check_permissions`
+- `core/models.py`: `PermissionLevel`
+- `bot.py`: `ModmailBot.command_perm`
+- `cogs/utility.py`: the moderator-only `alias` command
+
+### 10.2 Thread Objects and Channels
+
+**Verified source behavior:**
+
+- The concrete class is `core.thread.Thread`.
+- Important public properties are `id`, `channel`, `recipient`,
+  `recipients`, and `ready`.
+- `thread.id` is the primary recipient's Discord user ID. The source does not
+  define a separate Modmail-generated thread UUID.
+- `thread.recipient` is the primary customer (`discord.User` or
+  `discord.Member`); `thread.recipients` includes the primary and additional
+  recipients.
+- `thread.channel` returns the associated `discord.TextChannel` or
+  `discord.DMChannel`; Modmail-created support threads use a text channel.
+- Thread channel topics contain `User ID: <recipient.id>`, with optional
+  title and additional recipient IDs. `core.utils.parse_channel_topic` parses
+  these values.
+- `bot.threads.find(channel=channel)` and
+  `bot.threads.find(recipient=user)` are the verified thread-manager lookup
+  paths. The manager also repopulates its cache from Modmail guild text
+  channels at startup.
+- The `creator` is passed separately to lifecycle events and `Thread.setup`;
+  no public `thread.creator` property was verified.
+
+**Source references:**
+
+- `core/thread.py`: `Thread`, `ThreadManager.find`,
+  `ThreadManager.populate_cache`, and `Thread.from_channel`
+- `core/utils.py`: `parse_channel_topic` and `create_thread_channel`
+- `bot.py`: startup call to `self.threads.populate_cache()`
+
+### 10.3 Thread Lifecycle and Category Movement
+
+**Verified source behavior:**
+
+- `thread_initiate` is dispatched at the start of `Thread.setup`, before
+  channel creation; the thread may not have a channel yet.
+- `thread_create` is dispatched when `thread.ready` transitions to true.
+  This occurs after channel creation and initial log setup, but before the
+  final setup tasks and final ready event.
+- `thread_ready` is dispatched at the end of `Thread.setup` with
+  `thread, creator, category, initial_message`. This is the verified event to
+  prefer when a fully initialized thread is required.
+- `thread_close` is dispatched after close work completes. If
+  `delete_channel=True`, channel deletion is included before dispatch, so
+  handlers must not assume the channel still exists.
+- `thread_reply` is dispatched after Modmail sends a reply.
+- A thread channel is created with
+  `bot.modmail_guild.create_text_channel(...)`, including a category,
+  permission overwrites, and a topic containing the recipient ID.
+- The inspected source moves a channel with Discord.py's
+  `await thread.channel.edit(category=target, reason=...)`. No separate
+  Modmail category-movement wrapper was verified.
+
+**Recommendation:** For Modmail Queue, listen to `on_thread_ready`, use
+`thread.channel`, resolve and validate a `discord.CategoryChannel`, then use
+the channel's Discord.py `edit(category=...)` API. Handle missing or deleted
+channels explicitly.
+
+**Source references:**
+
+- `core/thread.py`: `Thread.setup`, `Thread.ready`, `Thread.close`,
+  and the category edit in the thread-creation-menu flow
+- `core/utils.py`: `create_thread_channel`
+
+### 10.4 Plugin Loading, Database, and Lifecycle
+
+**Verified source behavior:**
+
+- Modmail loads an extension with `await bot.load_extension(...)`.
+- The extension module is expected to expose:
+
+  ```python
+  async def setup(bot):
+      await bot.add_cog(PluginCog(bot))
+  ```
+
+- Cogs are registered through `await bot.add_cog(...)`.
+- Plugins are unloaded with `await bot.unload_extension(...)`. The plugin
+  manager also removes the extension's modules from `sys.modules`.
+- `bot.api.get_plugin_partition(self)` is implemented by
+  `MongoDBClient.get_plugin_partition`. It returns
+  `self.db.plugins[cog.__class__.__name__]`.
+- `self.db` is an `AsyncIOMotorDatabase`, so the returned value is an
+  `AsyncIOMotorCollection`, not a database or custom partition object.
+- Isolation is by Cog runtime class name under the MongoDB `plugins`
+  collection namespace. This naming is source behavior, not a separately
+  verified stable naming contract.
+- `bot.plugin_db.get_partition(self)` exists only as a deprecated compatibility
+  path. Use `bot.api.get_plugin_partition(self)`.
+- Discord.py Cog lifecycle hooks are available; the source demonstrates
+  `cog_load` and `cog_unload`.
+- Modmail's plugin manager dispatches `plugins_ready` after initial plugin
+  loading. No dedicated plugin shutdown event or plugin-specific reload hook
+  was verified.
+- No installed third-party plugin database example was present in the
+  inspected source repository.
+
+**Verified plugin pattern:**
+
+```python
+class Queue(commands.Cog):
+    def __init__(self, bot):
+        self.bot = bot
+        self.coll = bot.api.get_plugin_partition(self)
+
+async def setup(bot):
+    await bot.add_cog(Queue(bot))
+```
+
+All collection operations must be asynchronous.
+
+**Source references:**
+
+- `cogs/plugins.py`: plugin path construction, `load_extension`,
+  `unload_extension`, `cog_load`, and `plugins_ready`
+- `cogs/modmail.py`, `cogs/utility.py`, and `cogs/threadmenu.py`: internal
+  `setup(bot)` and Cog registration examples
+- `core/clients.py`: `ApiClient.get_plugin_partition`,
+  `MongoDBClient.get_plugin_partition`, and deprecated
+  `PluginDatabaseClient.get_partition`
+- `bot.py`: API client selection and deprecated `plugin_db`
+
+### 10.5 Limitations and APIs Not to Assume
+
+- Do not assume a standalone moderator-status property or undocumented
+  permission helper; use `core.checks.has_permissions` with the verified
+  `PermissionLevel`.
+- Do not assume `thread.id` is a ticket UUID; in the inspected source it is
+  the primary customer's Discord user ID.
+- Do not assume `thread.creator` exists as a public attribute; use the creator
+  event argument where required.
+- Do not use `on_thread_initiate` when a channel or fully initialized thread is
+  required.
+- Do not assume a channel exists during `on_thread_close`; it may already have
+  been deleted.
+- Do not assume a Modmail wrapper exists for moving categories; the verified
+  implementation uses `thread.channel.edit(category=...)`.
+- Do not access Modmail's database through `bot.db`, `bot.plugin_db`, or direct
+  core database internals for new code. Use the documented
+  `bot.api.get_plugin_partition(self)` entry point.
+- Do not assume a plugin shutdown event, reload callback, stable collection-name
+  contract, or existing third-party database example without verifying the
+  target Modmail source.
